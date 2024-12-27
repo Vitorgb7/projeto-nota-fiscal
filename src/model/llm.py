@@ -1,9 +1,17 @@
 import json
-from groq import Groq
 import re
+from groq import Groq
+from dotenv import load_dotenv
+import os
+
+# Carregar as variáveis do ambiente
+load_dotenv()
+
+# Obter a chave API do Groq do arquivo .env
+api_key = os.getenv("GROQ_API_KEY")
 
 # Configuração da chave da API Groq
-client = Groq(api_key="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")
+client = Groq(api_key=api_key)
 
 def adjust_value_format(value):
     """
@@ -39,10 +47,6 @@ def adjust_value_format(value):
 
     return "0,00"
 
-
-
-
-
 def adjust_serie_data(extracted_data):
     """
     Ajusta a série da nota fiscal, caso esteja disponível nos dados extraídos.
@@ -51,7 +55,6 @@ def adjust_serie_data(extracted_data):
     if series_pattern:
         return series_pattern.group(1)
     return None
-
 
 def refine_data(extracted_data):
     """
