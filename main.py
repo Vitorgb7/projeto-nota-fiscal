@@ -1,26 +1,19 @@
 from flask import Flask, request, jsonify
-import boto3
-import json
-import base64
 import logging
-from botocore.exceptions import BotoCoreError, ClientError
-from src.textract.textract import process_file
+from src.nlp.nlp import process_file
 from src.model.llm import refine_data
-from dotenv import load_dotenv
 import os
+import easyocr
+from PIL import Image
+import io
 
 # Carregar variáveis de ambiente
+from dotenv import load_dotenv
 load_dotenv()
 
 # Configuração do logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-# Inicializa o cliente S3
-s3_client = boto3.client('s3')
-
-# Nome do bucket S3
-BUCKET_NAME = os.getenv("BUCKET_NAME")
 
 # Inicializa o Flask
 app = Flask(__name__)
@@ -28,25 +21,29 @@ app = Flask(__name__)
 # Função de processamento que só será chamada quando houver uma requisição POST
 def process_file_content(file_content):
     try:
-        # Decodificar conteúdo base64
-        logger.info("Conteúdo do arquivo decodificado com sucesso")
-        decode_content = base64.b64decode(file_content)
+        # Inicializar o leitor EasyOCR
+        logger.info("Inicializando EasyOCR para extração de texto")
+        reader = easyocr.Reader(['pt', 'en'])  # Suporte para português e inglês
 
-        # Processa o arquivo (armazenar e extrair dados com Textract)
-        logger.info("Processando o arquivo com Textract")
-        extracted_data = process_file(decode_content)
-        logger.info(f"Dados extraídos do Textract: {extracted_data}")
+        # Convertendo o conteúdo binário para imagem
+        logger.info("Convertendo o conteúdo para imagem")
+        image = Image.open(io.BytesIO(file_content))
+
+        # Usar o EasyOCR para extrair o texto da imagem
+        logger.info("Extraindo texto da imagem usando EasyOCR")
+        result = reader.readtext(image)
+
+        # Extraindo o texto
+        extracted_data = " ".join([text[1] for text in result])
+        logger.info(f"Texto extraído: {extracted_data}")
 
         # Refina os dados extraídos
         logger.info("Refinando os dados extraídos com LLM")
-        refined_data = refine_data(extracted_data)
+        refined_data = refine_data(extracted_data.splitlines())
         logger.info(f"Dados refinados: {refined_data}")
 
         return refined_data
 
-    except (BotoCoreError, ClientError) as error:
-        logger.error(f"Erro AWS: {str(error)}")
-        return {"message": "Erro ao processar o arquivo com AWS Textract."}, 500
     except Exception as e:
         logger.error(f"Erro inesperado: {str(e)}")
         return {"message": "Erro inesperado no processamento."}, 500
@@ -54,16 +51,16 @@ def process_file_content(file_content):
 @app.route('/api', methods=['POST'])
 def process_request():
     try:
-        # Obtém o conteúdo do arquivo da requisição
-        get_file_content = request.json.get('content')
-        if not get_file_content:
-            logger.error("Nenhum conteúdo encontrado no evento.")
+        # Obtém o conteúdo binário do arquivo da requisição
+        file_content = request.data
+        if not file_content:
+            logger.error("Nenhum conteúdo encontrado na requisição.")
             return jsonify({"message": "Arquivo não enviado na requisição."}), 400
 
         logger.info("Conteúdo do arquivo recebido com sucesso")
 
         # Chama a função de processamento
-        refined_data = process_file_content(get_file_content)
+        refined_data = process_file_content(file_content)
 
         # Se houve erro no processamento, a função retornará uma mensagem de erro
         if isinstance(refined_data, tuple):
@@ -79,5 +76,10 @@ def process_request():
 
 # Inicia o servidor Flask
 if __name__ == '__main__':
-    logger.info("Servidor iniciado e esperando o envio do documento.")
-    app.run(debug=True)
+    try:
+        # Log para indicar que o servidor está iniciando
+        logger.info("Servidor iniciado e esperando o envio do documento.")
+        # Rodar o servidor na interface 0.0.0.0 e na porta 5000
+        app.run(debug=True, host='0.0.0.0', port=5000)
+    except Exception as e:
+        logger.error(f"Erro ao iniciar o servidor: {str(e)}")
