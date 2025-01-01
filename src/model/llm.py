@@ -3,186 +3,121 @@ import re
 from groq import Groq
 from dotenv import load_dotenv
 import os
+from nltk.tokenize import word_tokenize  # Exemplo de uso do nltk
+import logging
 
-# Carregar as variáveis do ambiente
+# Carregar variáveis de ambiente
 load_dotenv()
 
-# Obter a chave API do Groq do arquivo .env
+# Configuração da chave da API
 api_key = os.getenv("GROQ_API_KEY")
-
-# Configuração da chave da API Groq
 client = Groq(api_key=api_key)
+
+# Configuração do logger
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 def adjust_value_format(value):
     """
-    Ajusta o valor total, removendo os últimos três números e posicionando a vírgula na segunda casa decimal corretamente.
+    Ajusta o valor total, formatando corretamente para duas casas decimais.
     """
-    if value:
-        # Remove caracteres não numéricos (exceto vírgula e ponto)
-        value = re.sub(r'[^\d.,]', '', value)
+    if not value:
+        return "0,00"
 
-        # Remove separadores de milhares (pontos ou vírgulas)
-        value = value.replace('.', '').replace(',', '')
-
-        # Garantir que o valor tenha pelo menos 4 dígitos
-        if len(value) <= 3:
-            value = value.zfill(4)
-
-        # Se o valor tiver mais de 4 dígitos, remove os 3 últimos
-        if len(value) > 4:
-            value = value[:-3]
-        
-        # Formatação do valor para 4 casas decimais e inserção da vírgula
-        adjusted_value = value[:-2] + ',' + value[-2:]
-
-        # Caso o valor tenha apenas 1 ou 2 dígitos, coloca o zero à esquerda
-        if adjusted_value.startswith(','):
-            adjusted_value = '0' + adjusted_value
-        
-        # Garantir que tenha 4 casas decimais (adicionando zeros, se necessário)
-        if not adjusted_value.endswith(',00'):
-            adjusted_value += '00'
-
-        return adjusted_value
-
-    return "0,00"
+    # Normaliza o valor para remover caracteres indesejados
+    value = re.sub(r'[^\d.,]', '', value)
+    value = value.replace('.', '').replace(',', '')
+    value = value.zfill(4)[:-3] if len(value) > 3 else value.zfill(4)
+    adjusted_value = f"{value[:-2]},{value[-2:]}"
+    return adjusted_value if ',' in adjusted_value else f"0,{adjusted_value}"
 
 def adjust_serie_data(extracted_data):
     """
-    Ajusta a série da nota fiscal, caso esteja disponível nos dados extraídos.
+    Ajusta a série da nota fiscal a partir de um padrão definido.
     """
     series_pattern = re.search(r"Série:\s*(\S+)", extracted_data)
-    if series_pattern:
-        return series_pattern.group(1)
-    return None
+    return series_pattern.group(1) if series_pattern else None
 
 def refine_data(extracted_data):
     """
-    Refinamento dos dados utilizando a LLM Groq para complementar e validar os resultados.
+    Refina os dados utilizando a LLM Groq.
     """
-    refined_data = {
-        "nome_emissor": None,
-        "CNPJ_emissor": None,
-        "endereco_emissor": None,
-        "CNPJ_CPF_consumidor": None,
-        "data_emissao": None,
-        "numero_nota_fiscal": None,
-        "serie_nota_fiscal": None,
-        "valor_total": None,
-        "forma_pgto": None
-    }
+    refined_data = {key: None for key in [
+        "nome_emissor", "CNPJ_emissor", "endereco_emissor", "CNPJ_CPF_consumidor",
+        "data_emissao", "numero_nota_fiscal", "serie_nota_fiscal", "valor_total", "forma_pgto"
+    ]}
 
-    # Prompt base para a LLM Groq
-    base_prompt = """
-Você é um modelo de IA especializado em análise e extração de dados estruturados e semi-estruturados de documentos como notas fiscais. 
-Sua tarefa é analisar os dados fornecidos e refinar, validar e complementar as informações de forma precisa, garantindo que nenhum dado relevante seja ignorado. 
-A resposta deve ser fornecida em formato JSON.
+    # Log do conteúdo extraído antes do refinamento
+    logger.info(f"Conteúdo extraído antes do refinamento: {extracted_data}")
+    
+    # Prompt para refinar os dados
+    prompt = f"""
+Você é um modelo de IA especializado em extração de dados de notas fiscais. Analise os dados abaixo e extraia as informações no formato JSON especificado:
 
-### Estrutura do JSON esperada:
-{
-    "nome_emissor": "nome da empresa ou pessoa que emitiu a nota",
-    "CNPJ_emissor": "CNPJ da empresa emitente",
-    "endereco_emissor": "endereço completo da empresa emitente",
+### Estrutura JSON:
+{{
+    "nome_emissor": "Nome do emissor da nota fiscal",
+    "CNPJ_emissor": "CNPJ do emissor",
+    "endereco_emissor": "Endereço completo do emissor",
     "CNPJ_CPF_consumidor": "CNPJ ou CPF do consumidor",
-    "data_emissao": "data da emissão no formato YYYY-MM-DD",
-    "numero_nota_fiscal": "número da nota fiscal",
-    "serie_nota_fiscal": "série da nota fiscal",
-    "valor_total": "valor total da nota fiscal (com ou sem vírgula)",
-    "forma_pgto": "forma de pagamento (ex: Cartão, Dinheiro, PIX, etc.)"
-}
+    "data_emissao": "Data de emissão da nota fiscal",
+    "numero_nota_fiscal": "Número da nota fiscal",
+    "serie_nota_fiscal": "Série da nota fiscal",
+    "valor_total": "Valor total da nota fiscal",
+    "forma_pgto": "Forma de pagamento"
+}}
 
-### Importante:
-1. Caso algum dado esteja ausente, você deve retornar o valor como null.
-2. Caso não consiga identificar claramente algum dado, forneça uma explicação razoável no campo correspondente.
-3. Garanta que os campos sejam preenchidos corretamente de acordo com os padrões estabelecidos. Em casos onde os dados não sigam o formato esperado, busque normalizar ao máximo.
-4. Se algum dado estiver em um formato ambíguo ou não puder ser determinado com certeza, marque como null e, se possível, explique.
-5. Quando os dados não estiverem completos ou faltando informações, forneça um valor default adequado, como "null", e não deixe campos vazios.
-
-### Dados fornecidos:
+### Dados extraídos da imagem:
+{'\n'.join(extracted_data)}
 """
-
-    # Preparando os dados para enviar no prompt
-    input_data = "\n".join(extracted_data)
-    final_prompt = base_prompt + input_data + "\n"
-
-    print("Prompt final enviado:", final_prompt)  # Depuração
-
+    
     try:
-        # Usando o modelo 'llama3-8b-8192' ou outro modelo Groq disponível
-        chat_completion = client.chat.completions.create(
-            messages=[{
-                "role": "system", "content": "Você é um assistente útil."
-            }, {
-                "role": "user", "content": final_prompt
-            }],
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "Você é um assistente útil."},
+                {"role": "user", "content": prompt}
+            ],
             model="llama3-8b-8192"
         )
-
-        # Captura a resposta da LLM
-        llm_output = chat_completion.choices[0].message.content.strip()
-        print("Resposta da API:", llm_output)  # Depuração
-
-        # Ajustar o conteúdo para JSON válido
-        refined_data = _validate_and_convert_to_json(llm_output)
-
-        # Ajuste do campo valor_total
+        
+        # Obter resposta bruta do modelo
+        raw_output = response.choices[0].message.content.strip()
+        logger.info(f"Resposta bruta do modelo: {raw_output}")
+        
+        refined_data = _parse_and_validate_json(raw_output)
+        
+        if not refined_data or "valor_total" not in refined_data:
+            logger.error(f"Erro nos dados refinados: {raw_output}")
+            return refined_data
+        
+        # Ajustar o valor total e a série
         refined_data["valor_total"] = adjust_value_format(refined_data.get("valor_total"))
+        refined_data["serie_nota_fiscal"] = adjust_serie_data('\n'.join(extracted_data))
 
-        # Ajuste do campo serie_nota_fiscal
-        refined_data["serie_nota_fiscal"] = adjust_serie_data(extracted_data)
-
-    except json.JSONDecodeError as e:
-        print("Erro ao decodificar JSON:", e)
-        print("Saída original da LLM:", llm_output)  # Depuração para análise do formato errado
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Erro ao processar JSON: {e}")
     except Exception as e:
-        print("Erro ao usar a LLM Groq:", e)
+        logger.error(f"Erro na LLM Groq: {e}")
 
     return refined_data
 
-
-def _validate_and_convert_to_json(response_text):
+def _parse_and_validate_json(response_text):
     """
-    Valida e converte o texto retornado pela LLM em JSON válido.
+    Valida e converte uma string em JSON.
     """
+    response_text = re.sub(r"(?<=\{|,)\s*'([^']+)'\s*:", r'"\1":', response_text.replace("'", '"'))
     try:
-        if not response_text.startswith("{") or not response_text.endswith("}"):
-            # Extrai apenas a parte relevante se houver texto extra
-            response_text = response_text.split("{", 1)[-1]
-            response_text = "{" + response_text.split("}")[-2] + "}"
-
-        # Substitui aspas simples por aspas duplas
-        response_text = response_text.replace("'", '"')
-
-        # Valida se as chaves têm aspas duplas e ajusta se necessário
-        response_text = _ensure_double_quoted_keys(response_text)
-
-        # Converte a string JSON em um dicionário Python
         return json.loads(response_text)
-    except Exception as e:
-        print("Erro ao validar ou ajustar a resposta JSON:", e)
-        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Erro ao decodificar JSON: {e}")
+        return None
 
-
-def _ensure_double_quoted_keys(json_string):
-    """
-    Garante que as chaves do JSON estão com aspas duplas.
-    """
-    pattern = r"(?<=\{|,)\s*'([^']+)'\s*:"
-    return re.sub(pattern, r'"\1":', json_string)
-
-
-# Simulação de dados extraídos
-extracted_data_example = [
-    "Loja Exemplo Ltda",
-    "CNPJ: 12.345.678/0001-99",
-    "Rua das Flores, 123, São Paulo, SP",
-    "Consumidor: CPF 987.654.321-00",
-    "Data: 27/11/2024",
-    "Nota Fiscal: 123456 Série: A1",
-    "Valor Total: R$ 1.234,56",
-    "Forma de Pagamento: Cartão de Crédito"
-]
-
-# Testando a função com os dados extraídos
-refined_data_result = refine_data(extracted_data_example)
-print("Dados Refinados:", json.dumps(refined_data_result, indent=1, ensure_ascii=False))
+if __name__ == "__main__":
+    # Exemplo de dados extraídos
+    extracted_data_example = [
+        "Loja Exemplo Ltda", "CNPJ: 12.345.678/0001-99",
+        "Rua das Flores, 123, São Paulo, SP", "Consumidor: CPF 987.654.321-00",
+        "Data: 27/11/2024", "Nota Fiscal: 123456 Série: A1",
+        "Valor Total: R$ 1.234,56", "Forma de Pagamento: Cartão de Crédito"
+    ]
+    print("Dados Refinados:", json.dumps(refine_data(extracted_data_example), indent=2, ensure_ascii=False))
